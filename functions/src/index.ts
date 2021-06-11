@@ -1,9 +1,10 @@
 import * as functions from "firebase-functions";
 import axios from "axios";
-import { CENTER_RESPONSE, FIRESTORE_ALERT } from "./models/centerResponse";
+import {CENTER_RESPONSE, FIRESTORE_ALERT} from "./models/centerResponse";
 import admin = require("firebase-admin");
-require('dotenv').config()
-import { sendBulkTextMessage } from "./twilio/twilioService";
+require("dotenv").config();
+import {sendBulkTextMessage} from "./twilio/twilioService";
+import {FEES_VACCINE_ARRAY} from "./constants";
 admin.initializeApp();
 const getIfSlotExists = (data: CENTER_RESPONSE, age: number) => {
     const centerWithSessions = data.centers
@@ -50,33 +51,47 @@ export const scheduledFunction = functions.pubsub.schedule("*/15  * * * *").onRu
     console.log(cronArray.length);
     const jobs: Promise<any>[] = [];
     cronArray.forEach((data) => {
-        const { alert, mobile_numbers, idArr } = data;
-        const job = getAvailableSlots(alert.district_id, alert.age_category).then((data) => {// eslint-disable-line
-            if (data && data.length) {
-                console.log("-inside slots");
-                console.log(`Vaccination slot is available in ${alert.district_name}, ${alert.state_name} for age ${alert.age_category}`);// eslint-disable-line
-                const text = `Vaccination slot is available in ${alert.district_name}, ${alert.state_name} for age ${alert.age_category}`;
-                console.log(JSON.stringify(mobile_numbers));
-                const filtered_numbers = mobile_numbers.filter(number => number.length)
-                if (filtered_numbers.length) sendBulkTextMessage(text, filtered_numbers)
-                idArr.forEach(async (id) => {
-                    const docRef = db.collection("users").doc(id);
-                    const documents = (await db.collection("users").doc(id).get()).data();// eslint-disable-line
-                    const alertArray: FIRESTORE_ALERT[] = documents ? documents["alert"] : [];// eslint-disable-line
-                    console.log(JSON.stringify(alertArray));
-                    if (alertArray && alertArray.length) {
-                        const found = alertArray.find((alerts) => (alerts.age_category === alert.age_category && alerts.district_id === alert.district_id));
-                        if (found) {
-                            found.date_updated = new Date().toISOString();
-                            found.available = true;
-                            const restArray = alertArray.filter((alerts) => !(alerts.age_category === alert.age_category && alerts.district_id === alert.district_id))
-                            await docRef.update({
-                                alert: [...restArray, found],// eslint-disable-line
-                            });
-                        }
+        const { alert, config } = data;
+        const job = getAvailableSlots(alert.district_id, alert.age_category).then((centerData) => {// eslint-disable-line
+            if (centerData && centerData.length) {
+
+                config.forEach(configData => {
+                    const { idArr, mobile_numbers, type } = configData;
+                    const filteredSlots = centerData.filter(center => {
+                        if (center) {
+                            const { fee_type, sessions } = center;
+                            const typeObj = FEES_VACCINE_ARRAY[type];
+                            const foundSession = sessions.find(session => typeObj.vaccine.indexOf(session.vaccine) > -1)
+                            const foundFeeType = typeObj.fees.indexOf(fee_type) > -1;
+                            return foundSession && foundFeeType;
+                        } else return false;
+                    });
+                    if (filteredSlots && filteredSlots.length) {
+                        console.log("-inside slots");
+                        console.log(`Vaccination slot is available in ${alert.district_name}, ${alert.state_name} for age ${alert.age_category}`);// eslint-disable-line
+                        const text = `Vaccination slot is available in ${alert.district_name}, ${alert.state_name} for age ${alert.age_category}`;
+                        console.log(JSON.stringify(mobile_numbers));
+                        const filtered_numbers = mobile_numbers.filter(number => number.length)
+                        if (filtered_numbers.length) sendBulkTextMessage(text, filtered_numbers)
+                        idArr.forEach(async (id) => {
+                            const docRef = db.collection("users").doc(id);
+                            const documents = (await db.collection("users").doc(id).get()).data();// eslint-disable-line
+                            const alertArray: FIRESTORE_ALERT[] = documents ? documents["alert"] : [];// eslint-disable-line
+                            console.log(JSON.stringify(alertArray));
+                            if (alertArray && alertArray.length) {
+                                const found = alertArray.find((alerts) => (alerts.age_category === alert.age_category && alerts.district_id === alert.district_id && type === returnType(alert)));
+                                if (found) {
+                                    found.date_updated = new Date().toISOString();
+                                    found.available = true;
+                                    const restArray = alertArray.filter((alerts) => !(alerts.age_category === alert.age_category && alerts.district_id === alert.district_id && type === returnType(alert)))
+                                    await docRef.update({
+                                        alert: [...restArray, found],// eslint-disable-line
+                                    });
+                                }
+                            }
+                        });
                     }
                 });
-
             }
         }).catch(() => console.log("ran into err"));
         jobs.push(job);
@@ -187,12 +202,26 @@ const getCronJobData = async () => {
     const filteredArray: Array<{
         alert: FIRESTORE_ALERT,
         mobile_numbers: Array<string>,
-        idArr: Array<string>
+        idArr: Array<string>,
+        config: Array<{
+            type: number,
+            mobile_numbers: Array<string>,
+            idArr: Array<string>
+        }>
     }> = [];
     arr.forEach((unfilteredData) => {
         unfilteredData.alert.forEach((unfilteredAlert) => {
             const foundData = filteredArray.find((filtered) => (filtered.alert.district_id === unfilteredAlert.district_id && filtered.alert.age_category === unfilteredAlert.age_category));// eslint-disable-line
+            const typeIndex = returnType(unfilteredAlert);
             if (foundData) {
+                const { config } = foundData;
+                const newConfig = config?.find(data => data.type === typeIndex);
+                if (newConfig) {
+                    newConfig.mobile_numbers.push(unfilteredData.mobile_number);
+                    newConfig.idArr.push(unfilteredData.id);
+                } else {
+                    config?.push({ type: typeIndex, mobile_numbers: [unfilteredData.mobile_number], idArr: [unfilteredData.id] })
+                }
                 foundData.mobile_numbers.push(unfilteredData.mobile_number);
                 foundData.idArr.push(unfilteredData.id);
             } else {
@@ -200,6 +229,7 @@ const getCronJobData = async () => {
                     alert: unfilteredAlert,
                     mobile_numbers: [unfilteredData.mobile_number],
                     idArr: [unfilteredData.id],
+                    config: [{ type: typeIndex, mobile_numbers: [unfilteredData.mobile_number], idArr: [unfilteredData.id] }]
                 });
             }
         });
@@ -207,6 +237,17 @@ const getCronJobData = async () => {
     return filteredArray;
 };
 
+
+const returnType = (alert: FIRESTORE_ALERT) => {
+    const { fees = ['Paid', 'Free'], vaccine = ['COVAXIN', 'COVISHIELD'] } = alert;
+    const index = FEES_VACCINE_ARRAY.findIndex(arr => {
+        const feesAlert = fees.sort();
+        const vaccineAlert = vaccine.sort();
+        return (arr.fees.sort().toString() === feesAlert.toString() && arr.vaccine.sort().toString() === vaccineAlert.toString())
+    });
+    return index;
+
+}
 
 export const insertData = functions.https.onRequest(async (req, res) => {
     const db = admin.firestore();

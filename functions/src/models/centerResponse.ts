@@ -43,4 +43,6 @@ export interface FIRESTORE_ALERT {
   state_name: string; // eslint-disable-line
   date_updated: string; // eslint-disable-line
   available: boolean;
+  fees?: string[];
+  vaccine?: string[];
 }
